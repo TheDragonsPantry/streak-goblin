@@ -115,29 +115,38 @@ function unitLabel(a){return isMoney(a)?CURRENCIES.find(x=>x[0]===currencyCode()
 function calcStreak(a){
   const base=Number.isFinite(a.baseStreak)?a.baseStreak:(a.streak||0);
   const baseDate=a.baseDate||today();
-  const entries=Object.entries(a.history||{})
-    .filter(([d,s])=>d<=today() && (s==='complete'||s==='missed'))
-    .sort((x,y)=>x[0].localeCompare(y[0]));
-
-  // A historical Missed day is an explicit reset, even if it is before
-  // the imported streak's base date. Not Tracked days never enter this list.
-  let n=base;
-  let lastMissed=null;
-  for(const [d,s] of entries) if(s==='missed') lastMissed=d;
-
-  if(lastMissed){
-    n=0;
-    for(const [d,s] of entries){
-      if(d>lastMissed && s==='complete') n++;
+  const mode=a.streakMode||((a.trackStreak===false)?'none':'continuous');
+  if(mode==='none') return 0;
+  const entries=Object.entries(a.history||{}).filter(([d,s])=>d<=today()&&(s==='complete'||s==='missed')).sort((x,y)=>x[0].localeCompare(y[0]));
+  if(mode==='cycle'){
+    const length=Math.max(1,Math.min(365,Number(a.cycleLength)||7));
+    // A recorded missed day resets the cycle even if it predates baseDate.
+    // The missed date itself is Day 0; the next calendar day is Day 1.
+    if(a.resetIfMissed!==false){
+      const missedDates=entries.filter(([d,state])=>state==='missed').map(([d])=>d);
+      if(missedDates.length){
+        const lastMissed=missedDates[missedDates.length-1];
+        const utcDay=d=>Date.UTC(Number(d.slice(0,4)),Number(d.slice(5,7))-1,Number(d.slice(8,10)));
+        const elapsed=Math.max(0,Math.round((utcDay(today())-utcDay(lastMissed))/86400000));
+        return elapsed===0?0:((elapsed-1)%length)+1;
+      }
     }
-    return n;
+    let progress=base%length;
+    if(base>0&&progress===0)progress=length;
+    for(const [d,state] of entries){
+      if(d<baseDate || (d===baseDate && base>0 && state==='complete'))continue;
+      if(state==='missed'){
+        if(a.resetIfMissed!==false)progress=0;
+        continue;
+      }
+      progress=progress>=length?1:progress+1;
+    }
+    return progress;
   }
-
-  // No explicit miss anywhere: retain the imported streak and add only
-  // completed days recorded after the imported baseline date.
-  for(const [d,s] of entries){
-    if(d>baseDate && s==='complete') n++;
-  }
+  let n=base,lastMissed=null;
+  for(const [d,state] of entries)if(state==='missed')lastMissed=d;
+  if(lastMissed){n=0;for(const [d,state] of entries)if(d>lastMissed&&state==='complete')n++;return n;}
+  for(const [d,state] of entries)if(d>baseDate&&state==='complete')n++;
   return n;
 }
 let draggedAppId=null;
@@ -149,20 +158,20 @@ function dragOver(event){event.preventDefault();event.dataTransfer.dropEffect='m
 function dragLeave(event){if(!event.currentTarget.contains(event.relatedTarget))event.currentTarget.classList.remove('drag-over')}
 function dropApp(event,targetId){event.preventDefault();event.currentTarget.classList.remove('drag-over');const sourceId=draggedAppId||event.dataTransfer.getData('text/plain');if(!sourceId||sourceId===targetId)return;const from=apps.findIndex(a=>a.id===sourceId),to=apps.findIndex(a=>a.id===targetId);if(from<0||to<0)return;const [item]=apps.splice(from,1);apps.splice(to,0,item);save()}
 function render(){
- const done=apps.filter(a=>status(a,today())==='complete').length;
+ const done=apps.filter(a=>status(a,today())==='complete'||(Array.isArray(a.tasks)&&a.tasks.length>0&&a.tasks.every(t=>t.done))).length;
  dashboard.innerHTML=`<div class="stat"><span class="big">📱 ${done} / ${apps.length}</span><br><span class="meta">Today's apps completed</span></div>`;
  list.innerHTML=apps.length?apps.map(a=>`
  <div class="card ${a.collapsed?'collapsed':''}" data-app-id="${a.id}" ondragover="dragOver(event)" ondragleave="dragLeave(event)" ondrop="dropApp(event,'${a.id}')">
   <div class="card-heading"><span class="drag-grip" draggable="true" ondragstart="dragStart(event,'${a.id}')" ondragend="dragEnd(event)" title="Drag to reorder" aria-label="Drag to reorder">↕</span><span class="move-controls"><button class="move-btn" onclick="moveApp('${a.id}',-1)" aria-label="Move ${esc(a.name)} up" title="Move up">↑</button><button class="move-btn" onclick="moveApp('${a.id}',1)" aria-label="Move ${esc(a.name)} down" title="Move down">↓</button></span><button class="collapse-toggle" onclick="toggleCollapse('${a.id}')" aria-expanded="${!a.collapsed}" aria-label="${a.collapsed?'Expand':'Collapse'} ${esc(a.name)}"><span class="app-heading-text"><strong>${esc(a.name)}</strong><span class="meta">${a.type==='rewards'||a.type==='receipts'?(a.type==='receipts'?'🧾 Receipts':'💰 Rewards'):({games:'🎮 Games',receipts:'🧾 Receipts',learning:'📚 Learning',other:'🧩 Other',streak:'🔥 Streak'}[a.type]||'🔥 Streak')}</span></span><span class="collapse-chevron">${a.collapsed?'＋':'−'}</span></button></div>
   <div class="card-content" ${a.collapsed?'hidden':''}>
-  ${((a.type==='rewards'||a.type==='receipts')?(a.trackStreak??true):true)?`<div class="stat"><span class="big">🔥 ${calcStreak(a)}</span><br><span class="meta">day streak</span></div>`:''}
+  ${(a.streakMode==='none'||(a.streakMode==null&&a.trackStreak===false))?'':`<div class="stat"><span class="big">🔥 ${calcStreak(a)}</span><br><span class="meta">${a.streakMode==='cycle'?'cycle day':'day streak'}</span></div>`}
   ${(a.type==='rewards'||a.type==='receipts')?(()=>{const balance=Number(a.balance||0),goal=Number(a.goal||0),diff=Math.max(goal-balance,0),pct=goal>0?Math.min(balance/goal*100,100):0;return `<div class="stat"><span class="big">💰 ${unitAmount(a,balance)}</span><br><span class="meta">current ${isMoney(a)?'balance':'points'}</span></div>${goal>0?`<div class="stat"><span class="big">🎯 ${unitAmount(a,goal)}</span><br><span class="meta">goal ${isMoney(a)?'amount':'points'}</span></div><div class="points-progress"><div class="progress-track"><div class="progress-fill" style="width:${pct}%"></div></div><div class="progress-label"><span class="meta">${pct.toFixed(0)}% of goal</span><span class="meta">${diff===0?'🎉 Goal reached!':`${unitAmount(a,diff)} to go`}</span></div></div>`:''}`})():''}
   <h3>Today's Tasks</h3>
   ${a.tasks.map(t=>`<label class="task"><input type="checkbox" ${t.done?'checked':''} onchange="toggleTask('${a.id}','${t.id}')"> ${esc(t.name)}</label>`).join('')}
   ${a.code?`<div class="info">🎟️ <b>Invite Code</b> <code>${esc(a.code)}</code><button class="small" onclick="copyValue('${esc(a.code)}')">📋 Copy</button></div>`:''}
   ${a.link?`<div class="info">🔗 <b>Invite Link</b> <code>${esc(a.link)}</code><button class="small" onclick="copyValue('${esc(a.link)}')">📋 Copy</button></div>`:''}
   ${(a.type==='rewards'||a.type==='receipts')?`<div class="actions"><button onclick="points('${a.id}')">Enter Ending Points</button><button class="secondary" onclick="changeGoal('${a.id}')">🎯 Change Goal</button><button class="secondary" onclick="cashout('${a.id}')">Cash Out</button><button class="secondary" onclick="cashoutHistory('${a.id}')">📜 Cash Out History</button></div>`:''}
-  <div class="actions">${((a.type==='rewards'||a.type==='receipts')?(a.trackStreak??true):true)?`<button onclick="continueStreak('${a.id}')">🔥 Continue Streak</button><button class="secondary" onclick="week('${a.id}')">📅 Week</button>`:''}<button class="secondary" onclick="editApp('${a.id}')">✏️ Edit</button></div>
+  <div class="actions">${(a.streakMode==='none'||(a.streakMode==null&&a.trackStreak===false))?'':`<button onclick="continueStreak('${a.id}')">🔥 Continue Streak</button><button class="secondary" onclick="week('${a.id}')">📅 Week</button>`}<button class="secondary" onclick="editApp('${a.id}')">✏️ Edit</button></div>
   </div>
  </div>`).join(''):'<div class="empty">No apps yet. Add your first app!</div>';
 }
@@ -181,8 +190,10 @@ function openAdd(){
   <label>Tracking Unit</label><div role="group" aria-label="Tracking unit"><label><input type="radio" name="unit" value="points" checked style="width:auto"> Points</label><label><input type="radio" name="unit" value="currency" style="width:auto"> Currency</label></div>
   <label id="balLabel">Current Points Balance<input id="bal" type="number" min="0" step="0.01" value="0"></label>
   <label id="goalLabel">Goal Points<input id="goal" type="number" min="0" step="0.01" value="0"></label>
-  <label id="trackStreakWrap"><input id="trackStreak" type="checkbox" checked style="width:auto"> Track Streak</label>
+  
  </div>
+ <label>Streak Mode<select id="streakMode" onchange="document.getElementById('cycleFields').style.display=this.value==='cycle'?'block':'none'"><option value="continuous">Continuous streak</option><option value="none">No streak</option><option value="cycle">Auto-reset cycle</option></select></label>
+ <div id="cycleFields" style="display:none"><label>Cycle length (days)<input id="cycleLength" type="number" min="1" max="365" value="7"></label><label><input id="resetIfMissed" type="checkbox" checked style="width:auto"> Reset if missed day</label></div>
  <label>Invite Code <span class="meta">(optional)</span><input id="co" type="text"></label>
  <label>Invite Link <span class="meta">(optional)</span><input id="li" type="url"></label>
  <label>Tasks</label>
@@ -201,7 +212,7 @@ function createApp(){
  const a={id:crypto.randomUUID(),name:document.getElementById('n').value.trim()||'Unnamed App',type:document.getElementById('ty').value,
   baseStreak:starting+(yes&&starting===0?1:0),streak:starting+(yes&&starting===0?1:0),baseDate:yes?today():addDays(today(),-1),history:{},tasks:tasks.length?tasks:[{id:crypto.randomUUID(),name:'Daily check-in',done:false}],
   code:document.getElementById('co').value.trim(),link:document.getElementById('li').value.trim(),
-  balance:+(document.getElementById('bal')?.value||0),goal:+(document.getElementById('goal')?.value||0),unit:document.querySelector('input[name=unit]:checked')?.value||'points',trackStreak:document.getElementById('trackStreak')?.checked??true,cashouts:[],earnings:{}};
+  balance:+(document.getElementById('bal')?.value||0),goal:+(document.getElementById('goal')?.value||0),unit:document.querySelector('input[name=unit]:checked')?.value||'points',streakMode:document.getElementById('streakMode')?.value||'continuous',cycleLength:Math.max(1,Math.min(365,+(document.getElementById('cycleLength')?.value||7))),resetIfMissed:document.getElementById('resetIfMissed')?.checked??true,trackStreak:true,cashouts:[],earnings:{}};
  if(yes)a.history[today()]='complete';
  apps.push(a);hideModal();save();
 }
@@ -211,19 +222,22 @@ function editApp(id){
  <label>Name<input id="en" value="${esc(a.name)}"></label>
  <label>App Type<select id="etype"><option value="streak">Streak</option><option value="rewards">Rewards</option><option value="games">Games</option><option value="receipts">Receipts</option><option value="learning">Learning</option><option value="other">Other</option></select></label>
  <label>Starting/Corrected Streak<input id="es" type="number" min="0" value="${a.baseStreak||0}"></label>
- <div id="editRewardFields" style="display:${(a.type==='rewards'||a.type==='receipts')?'block':'none'}"><label>Tracking Unit</label><label><input type="radio" name="eunit" value="points" ${(a.unit||'points')==='points'?'checked':''} style="width:auto"> Points</label><label><input type="radio" name="eunit" value="currency" ${a.unit==='currency'?'checked':''} style="width:auto"> Currency</label><label id="ebLabel">${a.unit==='currency'?'Current Currency Balance':'Current Points'}<input id="eb" type="number" min="0" step="0.01" value="${a.balance||0}"></label><label id="egLabel">${a.unit==='currency'?'Goal Amount':'Goal Points'}<input id="eg" type="number" min="0" step="0.01" value="${a.goal||0}"></label><label id="editTrackStreakWrap"><input id="editTrackStreak" type="checkbox" ${(a.trackStreak??true)?'checked':''} style="width:auto"> Track Streak</label></div>
+ <div id="editRewardFields" style="display:${(a.type==='rewards'||a.type==='receipts')?'block':'none'}"><label>Tracking Unit</label><label><input type="radio" name="eunit" value="points" ${(a.unit||'points')==='points'?'checked':''} style="width:auto"> Points</label><label><input type="radio" name="eunit" value="currency" ${a.unit==='currency'?'checked':''} style="width:auto"> Currency</label><label id="ebLabel">${a.unit==='currency'?'Current Currency Balance':'Current Points'}<input id="eb" type="number" min="0" step="0.01" value="${a.balance||0}"></label><label id="egLabel">${a.unit==='currency'?'Goal Amount':'Goal Points'}<input id="eg" type="number" min="0" step="0.01" value="${a.goal||0}"></label></div>
+ <label>Streak Mode<select id="editStreakMode" onchange="document.getElementById('editCycleFields').style.display=this.value==='cycle'?'block':'none'"><option value="continuous">Continuous streak</option><option value="none">No streak</option><option value="cycle">Auto-reset cycle</option></select></label>
+ <div id="editCycleFields" style="display:none"><label>Cycle length (days)<input id="editCycleLength" type="number" min="1" max="365" value="${a.cycleLength||7}"></label><label><input id="editResetIfMissed" type="checkbox" ${(a.resetIfMissed!==false)?'checked':''} style="width:auto"> Reset if missed day</label></div>
  <label>Invite Code<input id="ec" value="${esc(a.code||'')}"></label>
  <label>Invite Link<input id="el" value="${esc(a.link||'')}"></label>
  <h3>Tasks</h3><div id="editTasks">${a.tasks.map(t=>`<div class="task-edit"><input data-id="${t.id}" value="${esc(t.name)}"><button type="button" class="danger small" onclick="this.parentElement.remove()">×</button></div>`).join('')}</div>
  <button type="button" class="secondary" onclick="addEditTask()">＋ Add Another Task</button>
  <div class="actions"><button onclick="saveEdit('${id}')">Save</button><button class="danger" onclick="deleteApp('${id}')">🗑️ Delete App</button><button class="secondary" onclick="hideModal()">Cancel</button></div>`);
  document.getElementById('etype').value=a.type||'streak';
+ document.getElementById('editStreakMode').value=a.streakMode||((a.trackStreak===false)?'none':'continuous');document.getElementById('editCycleFields').style.display=document.getElementById('editStreakMode').value==='cycle'?'block':'none';
  document.getElementById('etype').addEventListener('change',e=>document.getElementById('editRewardFields').style.display=(e.target.value==='rewards'||e.target.value==='receipts')?'block':'none');
  document.querySelectorAll('input[name=eunit]').forEach(el=>el.addEventListener('change',()=>{const m=document.querySelector('input[name=eunit]:checked')?.value==='currency';document.getElementById('ebLabel').firstChild.textContent=m?'Current Currency Balance':'Current Points';document.getElementById('egLabel').firstChild.textContent=m?'Goal Amount':'Goal Points'}));
 }
 function addEditTask(){const d=document.createElement('div');d.className='task-edit';d.innerHTML='<input type="text" placeholder="Another task"><button type="button" class="danger small" onclick="this.parentElement.remove()">×</button>';document.getElementById('editTasks').appendChild(d)}
 function saveEdit(id){
- const a=A(id);a.name=document.getElementById('en').value.trim()||a.name;const oldType=a.type;a.type=document.getElementById('etype').value;a.unit=document.querySelector('input[name=eunit]:checked')?.value||a.unit||'points';a.trackStreak=document.getElementById('editTrackStreak')?.checked??(a.trackStreak??true);a.baseStreak=+(document.getElementById('es').value||0);if(a.type==='rewards'||a.type==='receipts'){a.balance=+(document.getElementById('eb')?.value??a.balance??0);a.goal=+(document.getElementById('eg')?.value??a.goal??0)}
+ const a=A(id);a.name=document.getElementById('en').value.trim()||a.name;const oldType=a.type;a.type=document.getElementById('etype').value;a.unit=document.querySelector('input[name=eunit]:checked')?.value||a.unit||'points';a.streakMode=document.getElementById('editStreakMode')?.value||'continuous';a.cycleLength=Math.max(1,Math.min(365,+(document.getElementById('editCycleLength')?.value||7)));a.resetIfMissed=document.getElementById('editResetIfMissed')?.checked??true;a.trackStreak=a.streakMode!=='none';a.baseStreak=+(document.getElementById('es').value||0);if(a.type==='rewards'||a.type==='receipts'){a.balance=+(document.getElementById('eb')?.value??a.balance??0);a.goal=+(document.getElementById('eg')?.value??a.goal??0)}
  a.code=document.getElementById('ec').value.trim();a.link=document.getElementById('el').value.trim();
 
  a.tasks=[...document.querySelectorAll('#editTasks input')].map(x=>({id:x.dataset.id||crypto.randomUUID(),name:x.value.trim(),done:false})).filter(x=>x.name);
